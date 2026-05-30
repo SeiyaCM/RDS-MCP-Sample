@@ -1,0 +1,4 @@
+mcp>=1.2.0
+mysql-connector-python==9.0.0
+uvicorn==0.30.6
+starlette==0.38.6

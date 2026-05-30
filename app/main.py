@@ -1,0 +1,162 @@
+"""Streamlit エントリ。工場設備管理デモのチャット UI。"""
+
+from __future__ import annotations
+
+import os
+
+# Bedrock の Bearer 認証を boto3 に渡すためのブリッジ。
+# Strands Agents(Python) は BEDROCK_API_KEY を直接サポートしないため、
+# boto3 が解釈する AWS_BEARER_TOKEN_BEDROCK にコピーする。
+if os.getenv("BEDROCK_API_KEY") and not os.getenv("AWS_BEARER_TOKEN_BEDROCK"):
+    os.environ["AWS_BEARER_TOKEN_BEDROCK"] = os.environ["BEDROCK_API_KEY"]
+
+import streamlit as st
+
+from agent import build_agent
+from auth import ROLES, get_role
+
+
+SAMPLE_QUESTIONS = {
+    "tokyo_designer": [
+        "Tokyo の Line-2 の昨日の生産実績と不良率を見せて",
+        "ベアリング系の部品の設計変更履歴を直近で教えて",
+    ],
+    "tokyo_buyer": [
+        "Tokyo Steel Co. からの発注で納期遅れリスクがあるものは?",
+        "在庫が 50 個未満の部品とそのサプライヤーを一覧で",
+    ],
+    "tokyo_operator": [
+        "Tokyo Line-2 の昨日の稼働率を計算して",
+        "Tokyo の在庫が少ない部品トップ 5",
+    ],
+    "osaka_designer": [
+        "Osaka の Line-1 の品質指標(不良率)を直近 1 週間で",
+        "Osaka で最近変更された部品の BOM ツリーを見せて",
+    ],
+    "osaka_buyer": [
+        "Osaka で使う部品で発注リードタイムが長いトップ 5",
+        "Osaka の在庫推移(直近 1 週間の出庫量)",
+    ],
+    "osaka_operator": [
+        "Osaka Line-3 で停止が多かった時間帯は?",
+        "Osaka の在庫アラート(残量 30 未満)を出して",
+    ],
+    "quality_manager": [
+        "全社でこの 1 週間に不良率が悪化したラインは?",
+        "不良が多い部品トップ 5 と、その設計変更履歴",
+    ],
+    "admin": [
+        "全社の稼働率トップ 3 ラインと、対応するサプライヤーの納期遵守率",
+        "Osaka の不良が多かった日トップ 3 と、その日に該当部品の入庫があったか",
+        "全 DB の現在のテーブル一覧を出して",
+    ],
+}
+
+
+def main() -> None:
+    st.set_page_config(page_title="Factory MCP Demo", page_icon=":factory:", layout="wide")
+
+    if "messages" not in st.session_state:
+        st.session_state.messages = []
+    if "role_key" not in st.session_state:
+        st.session_state.role_key = "admin"
+
+    with st.sidebar:
+        st.title("Factory MCP Demo")
+        st.caption("自然言語の問い合わせを LLM が複数 DB(MySQL/PostgreSQL)に MCP 経由で展開します。")
+
+        role_keys = list(ROLES.keys())
+        role_key = st.selectbox(
+            "ロールを選択",
+            options=role_keys,
+            index=role_keys.index(st.session_state.role_key),
+            format_func=lambda k: ROLES[k].label,
+        )
+        if role_key != st.session_state.role_key:
+            st.session_state.role_key = role_key
+            st.session_state.messages = []
+
+        role = get_role(role_key)
+        st.markdown("**アクセス可能な DB**")
+        for db in role.allowed_databases:
+            st.markdown(f"- `{db}`")
+        if role.is_all_factories:
+            st.markdown("**拠点スコープ:** 全社")
+        else:
+            names = {1: "Tokyo", 2: "Osaka"}
+            scope = " / ".join(names[i] for i in role.factory_ids)
+            st.markdown(f"**拠点スコープ:** {scope}")
+
+        st.divider()
+        st.markdown("**サンプル質問**")
+        for q in SAMPLE_QUESTIONS.get(role_key, []):
+            if st.button(q, key=f"sample_{q}", use_container_width=True):
+                st.session_state.pending_question = q
+
+        if st.button("会話をリセット", use_container_width=True):
+            st.session_state.messages = []
+
+    st.title(f"工場設備管理デモ — {ROLES[st.session_state.role_key].label}")
+
+    for msg in st.session_state.messages:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+            for tc in msg.get("tool_calls", []):
+                with st.expander(f"ツール呼び出し: {tc['name']}"):
+                    st.code(tc.get("input", ""), language="json")
+                    st.code(tc.get("output", ""), language="json")
+
+    pending = st.session_state.pop("pending_question", None)
+    user_input = st.chat_input("質問を入力(例: Tokyo Line-2 の昨日の稼働率は?)")
+    question = pending or user_input
+
+    if question:
+        st.session_state.messages.append({"role": "user", "content": question})
+        with st.chat_message("user"):
+            st.markdown(question)
+
+        with st.chat_message("assistant"):
+            answer_placeholder = st.empty()
+            tool_calls_log: list[dict] = []
+            status_placeholder = st.status("LLM が回答を生成中…", expanded=False)
+            try:
+                role = get_role(st.session_state.role_key)
+                with build_agent(role) as agent:
+                    result = agent(question)
+                    answer = str(result)
+
+                    for msg_obj in getattr(agent, "messages", [])[-10:]:
+                        content = getattr(msg_obj, "content", None) or msg_obj.get("content") if isinstance(msg_obj, dict) else None
+                        if isinstance(content, list):
+                            for item in content:
+                                if isinstance(item, dict) and "toolUse" in item:
+                                    tu = item["toolUse"]
+                                    tool_calls_log.append({
+                                        "name": tu.get("name", ""),
+                                        "input": str(tu.get("input", "")),
+                                        "output": "",
+                                    })
+                                if isinstance(item, dict) and "toolResult" in item:
+                                    tr = item["toolResult"]
+                                    if tool_calls_log:
+                                        tool_calls_log[-1]["output"] = str(tr.get("content", ""))
+                status_placeholder.update(label="完了", state="complete")
+            except Exception as e:
+                answer = f"エラーが発生しました: {e}"
+                status_placeholder.update(label="エラー", state="error")
+
+            answer_placeholder.markdown(answer)
+            for tc in tool_calls_log:
+                with st.expander(f"ツール呼び出し: {tc['name']}"):
+                    st.code(tc["input"], language="json")
+                    st.code(tc["output"], language="json")
+
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": answer,
+                "tool_calls": tool_calls_log,
+            })
+
+
+if __name__ == "__main__":
+    main()

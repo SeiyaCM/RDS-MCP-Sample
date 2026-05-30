@@ -1,0 +1,133 @@
+services:
+  # ---------- データベース層 ----------
+  mysql80:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: ${SA_PASSWORD}
+      MYSQL_DATABASE: ebom_db
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    volumes:
+      - ./db-init/ebom:/docker-entrypoint-initdb.d:ro
+      - mysql80-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-p${SA_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  mysql57:
+    image: mysql:5.7
+    environment:
+      MYSQL_ROOT_PASSWORD: ${SA_PASSWORD}
+      MYSQL_DATABASE: procurement_db
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    volumes:
+      - ./db-init/procurement:/docker-entrypoint-initdb.d:ro
+      - mysql57-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-p${SA_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  postgres16:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: scada_db
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: app
+    volumes:
+      - ./db-init/scada:/docker-entrypoint-initdb.d:ro
+      - postgres16-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app -d scada_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  postgres13:
+    image: postgres:13
+    environment:
+      POSTGRES_DB: wms_db
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: app
+    volumes:
+      - ./db-init/wms:/docker-entrypoint-initdb.d:ro
+      - postgres13-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app -d wms_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  postgres14:
+    image: postgres:14
+    environment:
+      POSTGRES_DB: qms_db
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: app
+    volumes:
+      - ./db-init/qms:/docker-entrypoint-initdb.d:ro
+      - postgres14-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app -d qms_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  # ---------- MCP サーバー層 ----------
+  mcp-mysql:
+    build: ./mcps/mysql
+    environment:
+      MYSQL_TARGETS: |
+        ebom_db=mysql80:3306:root:${SA_PASSWORD}:ebom_db
+        procurement_db=mysql57:3306:root:${SA_PASSWORD}:procurement_db
+    depends_on:
+      mysql80:
+        condition: service_healthy
+      mysql57:
+        condition: service_healthy
+    ports:
+      - "8101:8000"
+
+  mcp-postgres:
+    build: ./mcps/postgres
+    environment:
+      POSTGRES_TARGETS: |
+        scada_db=postgres16:5432:app:app:scada_db
+        wms_db=postgres13:5432:app:app:wms_db
+        qms_db=postgres14:5432:app:app:qms_db
+    depends_on:
+      postgres16:
+        condition: service_healthy
+      postgres13:
+        condition: service_healthy
+      postgres14:
+        condition: service_healthy
+    ports:
+      - "8102:8000"
+
+  # ---------- アプリケーション層 ----------
+  app:
+    build: ./app
+    env_file:
+      - .env.local
+    environment:
+      MCP_MYSQL_URL: http://mcp-mysql:8000/sse
+      MCP_POSTGRES_URL: http://mcp-postgres:8000/sse
+    depends_on:
+      - mcp-mysql
+      - mcp-postgres
+    ports:
+      - "8501:8501"
+
+volumes:
+  mysql80-data:
+  mysql57-data:
+  postgres16-data:
+  postgres13-data:
+  postgres14-data:
