@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 
 # Bedrock の Bearer 認証を boto3 に渡すためのブリッジ。
@@ -14,32 +15,79 @@ import streamlit as st
 
 from agent import build_agent
 from auth import ROLES, get_role
+from system_prompt import DB_DESCRIPTIONS, FACTORY_NAMES
+
+
+QUERY_TOOL_NAMES = {"mysql_query", "postgres_query"}
+
+
+def format_executed_queries(tool_calls_log: list[dict]) -> str:
+    """ツール呼び出しログから実行された SELECT クエリを抜き出して Markdown 化する。"""
+    seen: set[tuple[str, str]] = set()
+    entries: list[tuple[str, str]] = []
+    for tc in tool_calls_log:
+        if tc.get("name") not in QUERY_TOOL_NAMES:
+            continue
+        raw = tc.get("input", "")
+        try:
+            payload = json.loads(raw) if isinstance(raw, str) else raw
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        database = payload.get("database")
+        sql = payload.get("sql")
+        if not database or not sql:
+            continue
+        sql = sql.strip()
+        key = (database, sql)
+        if key in seen:
+            continue
+        seen.add(key)
+        entries.append(key)
+
+    if not entries:
+        return ""
+
+    lines = ["", "---", "### 実行したクエリ", ""]
+    for idx, (database, sql) in enumerate(entries, start=1):
+        meta = DB_DESCRIPTIONS.get(database)
+        if meta:
+            header = f"**{idx}. {meta['label']} [`{database}` / {meta['engine']}]**"
+        else:
+            header = f"**{idx}. `{database}`**"
+        lines.append(header)
+        lines.append("```sql")
+        lines.append(sql)
+        lines.append("```")
+        lines.append("")
+    return "\n".join(lines)
 
 
 SAMPLE_QUESTIONS = {
     "tokyo_designer": [
-        "Tokyo の Line-2 の昨日の生産実績と不良率を見せて",
+        "東京工場の第2ラインの昨日の生産実績と不良率を見せて",
         "ベアリング系の部品の設計変更履歴を直近で教えて",
     ],
     "tokyo_buyer": [
-        "Tokyo Steel Co. からの発注で納期遅れリスクがあるものは?",
+        "東京製鋼株式会社からの発注で納期遅れリスクがあるものは?",
         "在庫が 50 個未満の部品とそのサプライヤーを一覧で",
     ],
     "tokyo_operator": [
-        "Tokyo Line-2 の昨日の稼働率を計算して",
-        "Tokyo の在庫が少ない部品トップ 5",
+        "東京工場の第2ラインの昨日の稼働率を計算して",
+        "東京工場の在庫が少ない部品トップ 5",
     ],
     "osaka_designer": [
-        "Osaka の Line-1 の品質指標(不良率)を直近 1 週間で",
-        "Osaka で最近変更された部品の BOM ツリーを見せて",
+        "大阪工場の第1ラインの品質指標(不良率)を直近 1 週間で",
+        "大阪工場で最近変更された部品の BOM ツリーを見せて",
     ],
     "osaka_buyer": [
-        "Osaka で使う部品で発注リードタイムが長いトップ 5",
-        "Osaka の在庫推移(直近 1 週間の出庫量)",
+        "大阪工場で使う部品で発注リードタイムが長いトップ 5",
+        "大阪工場の在庫推移(直近 1 週間の出庫量)",
     ],
     "osaka_operator": [
-        "Osaka Line-3 で停止が多かった時間帯は?",
-        "Osaka の在庫アラート(残量 30 未満)を出して",
+        "大阪工場の第3ラインで停止が多かった時間帯は?",
+        "大阪工場の在庫アラート(残量 30 未満)を出して",
     ],
     "quality_manager": [
         "全社でこの 1 週間に不良率が悪化したラインは?",
@@ -47,7 +95,7 @@ SAMPLE_QUESTIONS = {
     ],
     "admin": [
         "全社の稼働率トップ 3 ラインと、対応するサプライヤーの納期遵守率",
-        "Osaka の不良が多かった日トップ 3 と、その日に該当部品の入庫があったか",
+        "大阪工場の不良が多かった日トップ 3 と、その日に該当部品の入庫があったか",
         "全 DB の現在のテーブル一覧を出して",
     ],
 }
@@ -79,12 +127,12 @@ def main() -> None:
         role = get_role(role_key)
         st.markdown("**アクセス可能な DB**")
         for db in role.allowed_databases:
-            st.markdown(f"- `{db}`")
+            label = DB_DESCRIPTIONS[db]["label"]
+            st.markdown(f"- {label} (`{db}`)")
         if role.is_all_factories:
             st.markdown("**拠点スコープ:** 全社")
         else:
-            names = {1: "Tokyo", 2: "Osaka"}
-            scope = " / ".join(names[i] for i in role.factory_ids)
+            scope = " / ".join(FACTORY_NAMES[i] for i in role.factory_ids)
             st.markdown(f"**拠点スコープ:** {scope}")
 
         st.divider()
@@ -107,7 +155,7 @@ def main() -> None:
                     st.code(tc.get("output", ""), language="json")
 
     pending = st.session_state.pop("pending_question", None)
-    user_input = st.chat_input("質問を入力(例: Tokyo Line-2 の昨日の稼働率は?)")
+    user_input = st.chat_input("質問を入力(例: 東京工場の第2ラインの昨日の稼働率は?)")
     question = pending or user_input
 
     if question:
@@ -141,6 +189,7 @@ def main() -> None:
                                     if tool_calls_log:
                                         tool_calls_log[-1]["output"] = str(tr.get("content", ""))
                 status_placeholder.update(label="完了", state="complete")
+                answer = answer + format_executed_queries(tool_calls_log)
             except Exception as e:
                 answer = f"エラーが発生しました: {e}"
                 status_placeholder.update(label="エラー", state="error")

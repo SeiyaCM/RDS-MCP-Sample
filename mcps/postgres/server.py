@@ -1,14 +1,14 @@
-"""PostgreSQL 向け MCP サーバー(SSE トランスポート)。
+"""PostgreSQL 向け MCP サーバー(Streamable HTTP トランスポート、ステートレス)。
 
 複数の PostgreSQL DB をまとめて扱える。接続先は環境変数 POSTGRES_TARGETS で定義する:
     POSTGRES_TARGETS=alias=host:port:user:password:dbname
 を改行区切りで複数行記述する。
 
-公開ツール:
-- list_databases() : 接続可能な DB(alias)とエンジンバージョンを返す
-- list_tables(database) : 指定 DB のテーブル一覧
-- describe_table(database, table) : カラム情報
-- query(database, sql, limit) : 読み取り専用 SQL を実行
+公開ツール(MCP サーバー間の名前衝突を避けるため postgres_ プレフィックスを付与):
+- postgres_list_databases() : 接続可能な DB(alias)とエンジンバージョンを返す
+- postgres_list_tables(database) : 指定 DB のテーブル一覧
+- postgres_describe_table(database, table) : カラム情報
+- postgres_query(database, sql, limit) : 読み取り専用 SQL を実行
 """
 
 import os
@@ -42,7 +42,13 @@ def _parse_targets() -> dict[str, dict[str, Any]]:
 
 
 TARGETS = _parse_targets()
-mcp = FastMCP("mcp-postgres", host="0.0.0.0", port=8000)
+mcp = FastMCP(
+    "mcp-postgres",
+    host="0.0.0.0",
+    port=8000,
+    stateless_http=True,
+    json_response=True,
+)
 
 
 def _connect(alias: str):
@@ -60,7 +66,7 @@ _SELECT_RE = re.compile(r"^\s*(SELECT|WITH|SHOW|EXPLAIN)\b", re.IGNORECASE)
 _FORBIDDEN_RE = re.compile(r"\b(INSERT|UPDATE|DELETE|DROP|TRUNCATE|ALTER|CREATE|GRANT|REVOKE|RENAME|REPLACE)\b", re.IGNORECASE)
 
 
-@mcp.tool()
+@mcp.tool(name="postgres_list_databases")
 def list_databases() -> list[dict[str, str]]:
     """Return PostgreSQL database aliases this server can access, with engine version."""
     result = []
@@ -76,7 +82,7 @@ def list_databases() -> list[dict[str, str]]:
     return result
 
 
-@mcp.tool()
+@mcp.tool(name="postgres_list_tables")
 def list_tables(database: str) -> list[str]:
     """List tables in the given PostgreSQL database alias (public schema only)."""
     with _connect(database) as conn:
@@ -88,7 +94,7 @@ def list_tables(database: str) -> list[str]:
             return [r[0] for r in cur.fetchall()]
 
 
-@mcp.tool()
+@mcp.tool(name="postgres_describe_table")
 def describe_table(database: str, table: str) -> list[dict[str, Any]]:
     """Return column info: name / type / nullable / default."""
     if not re.match(r"^[A-Za-z0-9_]+$", table):
@@ -108,7 +114,7 @@ def describe_table(database: str, table: str) -> list[dict[str, Any]]:
             ]
 
 
-@mcp.tool()
+@mcp.tool(name="postgres_query")
 def query(database: str, sql: str, limit: int = 200) -> dict[str, Any]:
     """Run a read-only SQL (SELECT/WITH/SHOW/EXPLAIN) against a PostgreSQL database alias.
 
@@ -151,4 +157,4 @@ def _to_python(v: Any) -> Any:
 
 
 if __name__ == "__main__":
-    mcp.run(transport="sse")
+    mcp.run(transport="streamable-http")
