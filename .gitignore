@@ -3,3 +3,14 @@ __pycache__/
 *.pyc
 .venv/
 .DS_Store
+
+# シードデータ作成用の使い捨て作業スクリプト・出力(リポジトリには含めない)
+scripts/append_2026_06_14.py
+scripts/append_2026_06_15_21.py
+scripts/check_rows.py
+scripts/check_ship.py
+scripts/count_ids.py
+scripts/generate_seed_append.py
+scripts/test_mcp_queries.py
+scripts/verify_append.py
+scripts/_test_out.txt
